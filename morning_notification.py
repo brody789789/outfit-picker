@@ -1,127 +1,79 @@
+"""
+Outfit Picker - morning phone notification
+CIS 245 Course Project - Group 5
+
+GitHub Actions runs this every 15 minutes during morning hours. For each
+person in data/profiles.json whose send time has come (and who hasn't been
+messaged today), it gets the forecast, builds the message with core.py,
+and sends it through ntfy.
+
+    python morning_notification.py        send to whoever is due
+    python morning_notification.py --now  send to everyone right now (testing)
+"""
 
 import os
-import urllib.request
-import urllib.parse
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from outfit_picker import (
-    get_coordinates,
-    fetch_weather,
-    wind_speed_to_level,
-    get_outfit_recommendation
+from core import (
+    DATA_FILES,
+    build_day_plan,
+    build_message,
+    failure_message,
+    format_date,
+    is_due,
+    load_json,
+    save_json,
 )
+from online import WEB_ERRORS, get_forecast_with_retries, send_ntfy
 
-# -----------------------------------------
-# SETTINGS
-# -----------------------------------------
-
-# Change this to your preferred city
-CITY = "Hamden, CT"
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-# -----------------------------------------
-# CREATE MORNING MESSAGE
-# -----------------------------------------
-
-def morning_message(outfit, reasons, temperature, city):
-
-    message = "Good morning! ☀️\n\n"
-
-    message += f"Today's weather in {city}:\n"
-    message += f"Temperature: {temperature}°F\n\n"
-
-    message += "👕 Your Recommended Outfit:\n"
-
-    for item in outfit:
-        message += f"• {item.capitalize()}\n"
-
-    message += "\n💡 Why This Outfit:\n"
-
-    for reason in reasons:
-        message += f"• {reason.capitalize()}\n"
-
-    message += "\nHave a great day!"
-
-    return message
+def data_path(name):
+    return os.path.join(HERE, DATA_FILES[name])
 
 
-# -----------------------------------------
-# GET WEATHER AND PICK OUTFIT
-# -----------------------------------------
-
-def send_morning_outfit():
-
-    # Get private topic from GitHub Secrets
-    topic = os.environ["NTFY_TOPIC"]
-
-    print("Starting morning outfit notification...")
-
-    # Find city coordinates
-    location = get_coordinates(CITY)
-
-    if location is None:
-        raise ValueError(f"City not found: {CITY}")
-
-    lat, lon, matched_name = location
-
-    # Get current weather
-    current = fetch_weather(lat, lon)
-
-    temperature = current["temperature_2m"]
-    precipitation = current["precipitation"]
-    wind_speed = current["wind_speed_10m"]
-    is_day = current["is_day"]
-
-    # Convert weather data
-    is_raining = precipitation > 0
-
-    wind_level = wind_speed_to_level(wind_speed)
-
-    is_sunny = bool(is_day) and precipitation == 0
-
-    # Call original outfit recommendation function
-    outfit, reasons = get_outfit_recommendation(
-        temperature,
-        is_raining,
-        wind_level,
-        is_sunny
-    )
-
-    # Create morning notification
-    message = morning_message(
-        outfit,
-        reasons,
-        temperature,
-        matched_name
-    )
-
-    # -----------------------------------------
-    # SEND NOTIFICATION TO NTFY
-    # -----------------------------------------
-
-    safe_topic = urllib.parse.quote(topic, safe="")
-
-    url = "https://ntfy.sh/" + safe_topic
-
-    request = urllib.request.Request(
-        url,
-        data=message.encode("utf-8"),
-        headers={
-            "Title": "Your Morning Outfit",
-            "Priority": "default",
-            "Tags": "shirt,sunny"
-        },
-        method="POST"
-    )
-
-    with urllib.request.urlopen(request, timeout=15) as response:
-        print("ntfy HTTP status:", response.status)
-
-    print("Morning outfit notification sent!")
+def message_for(profile):
+    """Get the forecast (with retries) and return the text to send."""
+    forecast = get_forecast_with_retries(profile)
+    if forecast is None:
+        return failure_message(profile["city"])
+    plan = build_day_plan(forecast["times"], forecast["high"], forecast["low"])
+    return build_message(profile["city"], format_date(forecast["date"]), plan)
 
 
-# -----------------------------------------
-# RUN PROGRAM
-# -----------------------------------------
+def run(send_everyone_now):
+    profiles = load_json(data_path("profiles"), {})
+    sent_log = load_json(data_path("sent_log"), {})
+
+    for name, profile in profiles.items():
+        topic = os.environ.get(profile["topic_env"], "")
+        if not topic:
+            print(f"{name}: no {profile['topic_env']} secret set, skipping.")
+            continue
+
+        now = datetime.now(ZoneInfo(profile["timezone"]))
+        today = now.date().isoformat()
+        if not send_everyone_now and not is_due(
+            now.strftime("%H:%M"), profile["send_time"], today, sent_log.get(name, "")
+        ):
+            print(f"{name}: not due (send time {profile['send_time']}, now {now:%H:%M}).")
+            continue
+
+        message = message_for(profile)
+        try:
+            status = send_ntfy(topic, message)
+        except WEB_ERRORS as error:
+            print(f"{name}: couldn't reach ntfy ({error}); will try again next run.")
+            continue
+        print(f"{name}: sent (ntfy status {status}).")
+
+        if not send_everyone_now:
+            sent_log[name] = today
+            save_json(data_path("sent_log"), sent_log)
+
 
 if __name__ == "__main__":
-    send_morning_outfit()
+    run("--now" in sys.argv)
