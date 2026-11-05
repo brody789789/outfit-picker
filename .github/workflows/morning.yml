@@ -1,27 +1,50 @@
-
-name: Daily Outfit Notification
+name: Morning outfit
 
 on:
   schedule:
-    - cron: "0 7 * * *"
-      timezone: "America/New_York"
-
+    # Every 15 minutes from 10:07 to 16:52 UTC. That's 5:07-11:52 AM Eastern
+    # in winter and 6:07 AM-12:52 PM in summer. The odd minutes avoid the top
+    # of the hour, when GitHub is busiest and runs are most often late.
+    - cron: "7,22,37,52 10-16 * * *"
   workflow_dispatch:
+    inputs:
+      send_now:
+        description: "Send to everyone right now (ignores send times)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: morning-outfit
+  cancel-in-progress: false
 
 jobs:
-  send-outfit:
+  send:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
     steps:
-      - name: Get project files
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
-      - name: Send outfit notification
+      - name: Send messages that are due
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python morning_notification.py
+          NTFY_TOPIC_JARIANA: ${{ secrets.NTFY_TOPIC_JARIANA }}
+          NTFY_TOPIC_MARLEY: ${{ secrets.NTFY_TOPIC_MARLEY }}
+          NTFY_TOPIC_CODY: ${{ secrets.NTFY_TOPIC_CODY }}
+        run: python morning_notification.py ${{ inputs.send_now && '--now' || '' }}
+
+      - name: Remember who was messaged today
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/sent_log.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Update sent log"
+          git pull --rebase
+          git push
