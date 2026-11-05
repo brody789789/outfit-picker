@@ -1,0 +1,11 @@
+
+{
+  "Ben": {
+    "city": "Hamden, CT",
+    "latitude": 41.3959,
+    "longitude": -72.8968,
+    "timezone": "America/New_York",
+    "send_time": "07:00",
+    "topic_env": "NTFY_TOPIC"
+  }
+}
